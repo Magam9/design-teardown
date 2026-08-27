@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Packaged skill bundles — built on release, not source
+*.skill
+
+# Local teardown runs (leading slash: keeps examples/**/crops/ tracked)
+/crops/
+/regions.json
+/IMPLEMENTATION_PROMPT.md
+
+# macOS
+.DS_Store
