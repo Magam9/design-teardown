@@ -6,10 +6,15 @@ __pycache__/
 # Packaged skill bundles — built on release, not source
 *.skill
 
-# Local teardown runs (leading slash: keeps examples/**/crops/ tracked)
+# Local teardown runs at the repo root only. The leading slash is load-bearing:
+# without it these patterns also match examples/**/, which would silently drop
+# the most valuable content in the repo. Do not "tidy" the slashes away, and do
+# not broaden these to /*/**/ — that matches examples/<name>/crops/ too.
 /crops/
 /regions.json
+/probes.json
 /IMPLEMENTATION_PROMPT.md
+/measurements.txt
 
 # macOS
 .DS_Store
