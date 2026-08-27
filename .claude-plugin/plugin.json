@@ -1,0 +1,12 @@
+{
+  "name": "design-teardown",
+  "version": "0.1.0",
+  "description": "Turn a UI screenshot into per-component crops, design tokens, and a measured implementation prompt.",
+  "author": {
+    "name": "Magam9",
+    "url": "https://github.com/Magam9"
+  },
+  "repository": "https://github.com/Magam9/design-teardown",
+  "license": "MIT",
+  "keywords": ["design-to-code", "screenshot", "design-tokens", "ui"]
+}

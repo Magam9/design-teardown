@@ -1,0 +1,14 @@
+{
+  "name": "design-teardown",
+  "owner": {
+    "name": "Magam9",
+    "url": "https://github.com/Magam9"
+  },
+  "plugins": [
+    {
+      "name": "design-teardown",
+      "source": "./",
+      "description": "Slices a UI screenshot into per-component crops and writes a measured implementation prompt."
+    }
+  ]
+}
