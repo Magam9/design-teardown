@@ -57,6 +57,41 @@ Every value is tagged:
 The tags exist so the recipient knows which numbers to trust. A spec that quietly invents a
 hover color sends the next agent off building fiction.
 
+## Prerequisites
+
+**Runtime**
+
+- **Python 3.8+** on the machine that runs the skill — `python3` must be on `PATH`.
+- **[Pillow](https://pillow.readthedocs.io/)**, the only third-party dependency
+  (everything else is stdlib):
+
+  ```bash
+  pip install pillow
+  # Homebrew / Debian / other externally-managed Python:
+  pip install pillow --break-system-packages
+  ```
+
+**Host**
+
+A Claude surface that can both see images and run shell commands — the two passes are
+split between vision and the script, so neither alone is enough.
+
+- **Claude Code** — the plugin install path below needs a version with plugin marketplace
+  support (`/plugin`). Older versions can still use the manual skill copy.
+- **Claude.ai / desktop** — requires the code-execution tool enabled for the conversation,
+  since the scripts run in that sandbox rather than on your machine.
+
+**Input image**
+
+- Native-resolution capture. Anything already downscaled has thrown away the corner
+  staircase and 1px borders that the crops exist to read.
+- PNG, or another lossless format. JPEG artifacts shift sampled colors; the skill flags
+  those results `guessed` rather than `measured`.
+- A real screenshot, not a photo of a screen — moiré and uneven lighting make color
+  sampling meaningless.
+- Knowing the source DPR helps. `probe` guesses it, but a wrong guess doubles or halves
+  every number in the final spec, so correct it if you know better.
+
 ## Install
 
 **Claude Code**
@@ -71,8 +106,6 @@ hover color sends the next agent off building fiction.
 
 **Manually** — copy `skills/design-teardown/` into `~/.claude/skills/` (personal) or
 `.claude/skills/` (project).
-
-Requires Python 3 with Pillow: `pip install pillow`
 
 ## Use
 
