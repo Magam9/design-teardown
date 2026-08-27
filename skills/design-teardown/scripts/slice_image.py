@@ -5,6 +5,7 @@ Subcommands:
   probe     <image>                 dimensions, aspect, device class, DPR guess
   crop      <regions.json>          per-region crops with padding + upscaling
   colors    <regions.json>          dominant palette + probes per region
+  geometry  <regions.json>          fill bounding box and corner radii per region
   contrast  <fg> <bg>               WCAG contrast ratio
 
 regions.json format:
@@ -23,7 +24,9 @@ chosen from region size when omitted.
 """
 
 import argparse
+import collections
 import json
+import math
 import os
 import re
 import sys
@@ -236,6 +239,22 @@ def cmd_crop(args):
 # Two corner samples this close are the same fill with dithering noise on top.
 CORNER_TOLERANCE = 6
 
+# Two *surfaces* this close are the same surface. Deliberately tighter than
+# CORNER_TOLERANCE: a light-theme card is routinely only 5/255 off the page
+# behind it (#FAFCFE on #FFFFFF), and treating that as "no shape here" would
+# skip the majority of components on exactly the screenshots this is aimed at.
+SURFACE_TOLERANCE = 3
+
+# Corner radii carry a couple of pixels of anti-aliasing noise, so four corners
+# of one rounded rect rarely measure identically. Only call a shape non-uniform
+# when the corners disagree by more than this.
+RADIUS_SPREAD_ABS = 6.0
+RADIUS_SPREAD_REL = 0.25
+
+# Fraction of its own bounding box a real single shape fills. Below this the box
+# holds text or several components, and no radius reading from it means anything.
+MIN_SHAPE_DENSITY = 0.65
+
 
 def region_palette(im, box, top):
     crop = im.crop(box).convert("RGB")
@@ -323,6 +342,248 @@ def cmd_colors(args):
             print()
 
 
+# ---------------------------------------------------------------- geometry
+
+
+# A quarter-disc of radius R leaves this fraction of its bounding square empty.
+CORNER_CUTOUT_RATIO = 1.0 - math.pi / 4.0
+
+
+def radius_from_cutout(area):
+    """Recover a corner radius from the area the rounded corner cuts away.
+
+    Measuring instead by "rows until the fill run reaches the shape's edge" is
+    the obvious approach and it is wrong twice over: it under-reports by
+    `sqrt(R)` (the arc meets its tangent before the run does), and a single
+    misclassified row — one shadow pixel, one glyph — throws the whole corner
+    off. A 398px-tall card measured a 391px bottom-right radius that way.
+
+    Area integrates over the entire corner, so stray pixels move it by their
+    own size rather than by hundreds of pixels.
+    """
+    return math.sqrt(max(area, 0.0) / CORNER_CUTOUT_RATIO)
+
+
+def corner_cutout_area(is_fill, bw, bh, cx, cy):
+    """Flood the background region touching one corner of the fill's bounding box.
+
+    Bounded to a window around the corner and seeded at the corner pixel, so
+    unrelated background-coloured content deeper inside the shape (an icon tile,
+    a photo) is never reached — it isn't connected to the corner.
+    """
+    side = min(min(bw, bh) // 2 + 1, 80)
+    sx, sy = (0 if cx == 0 else bw - side), (0 if cy == 0 else bh - side)
+    seed = (cx * (bw - 1), cy * (bh - 1))
+    if is_fill(*seed):
+        return 0.0
+
+    seen = {seed}
+    stack = [seed]
+    while stack:
+        x, y = stack.pop()
+        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if not (sx <= nx < sx + side and sy <= ny < sy + side):
+                continue
+            if (nx, ny) in seen or is_fill(nx, ny):
+                continue
+            seen.add((nx, ny))
+            stack.append((nx, ny))
+    return float(len(seen))
+
+
+def _dominant(pixels):
+    counts = collections.Counter(pixels)
+    return counts.most_common(1)[0][0] if counts else None
+
+
+def region_geometry(im, box):
+    """Measure the bounding box and four corner radii of the shape filling a region.
+
+    Everything here is arithmetic on pixels. The alternative — counting the
+    staircase by eye on an upscaled crop — fails outright when a surface sits on
+    a background only a few values away (a #FAFCFE card on #FFFFFF is invisible
+    at any zoom), which is exactly the case in most light-theme UIs.
+    """
+    x0, y0, x1, y1 = box
+    crop = im.crop(box).convert("RGB")
+    w, h = crop.size
+    px = crop.load()
+
+    # Background = the region's outer ring. Fill = the most common colour that
+    # is *not* the background. Taking the middle of the box instead looks
+    # reasonable and fails on anything with a gap at its centre — a pair of
+    # stepper buttons reads as pure background and the shapes vanish.
+    ring = ([px[x, 0] for x in range(w)] + [px[x, h - 1] for x in range(w)]
+            + [px[0, y] for y in range(h)] + [px[w - 1, y] for y in range(h)])
+    bg = _dominant(ring)
+    if bg is None:
+        return None
+
+    # Merge near-identical values before counting. A flat #ECF0F3 button is
+    # spread across a dozen exact RGB values by dithering, and each one alone
+    # falls under the coverage floor below even when the button is a quarter of
+    # the box — the shape would vanish. Cluster by distance rather than by
+    # fixed buckets: the surfaces being told apart here are routinely 5/255
+    # apart, so any bucket wide enough to absorb dithering is also wide enough
+    # to merge a white card into the off-white page behind it.
+    total = w * h
+    near = lambda a, b: max(abs(p - q) for p, q in zip(a, b)) <= SURFACE_TOLERANCE
+    counts = collections.Counter(px[x, y] for y in range(h) for x in range(w))
+    clusters = []
+    for colour, n in counts.most_common():
+        if near(colour, bg):
+            continue
+        for cl in clusters:
+            if near(colour, cl[1]):
+                cl[0] += n
+                break
+        else:
+            if len(clusters) >= 96:
+                break
+            clusters.append([n, colour])
+    if not clusters:
+        return {"uniform": True, "fill": to_hex(bg)}
+    n_fill, fill = max(clusters, key=lambda cl: cl[0])
+    # Below this the "shape" is just anti-aliasing and stray content, not a surface.
+    if n_fill < 0.03 * total:
+        return {"uniform": True, "fill": to_hex(bg)}
+
+    # Classify by nearest of the two, so anti-aliased edge pixels land on the
+    # side they are closer to instead of being dropped.
+    d2 = lambda p, c: sum((a - b) ** 2 for a, b in zip(p, c))
+    runs = {}
+    for y in range(h):
+        xs = [x for x in range(w) if d2(px[x, y], fill) < d2(px[x, y], bg)]
+        if xs:
+            runs[y] = (xs[0], xs[-1])
+    if not runs:
+        return None
+
+    ys = sorted(runs)
+    top, bot = ys[0], ys[-1]
+    left = min(v[0] for v in runs.values())
+    right = max(v[1] for v in runs.values())
+    bw, bh = right - left + 1, bot - top + 1
+
+    # Re-classify inside the fill's own bounding box, in bbox-local coordinates.
+    fills = set()
+    for y in ys:
+        for x in range(w):
+            if d2(px[x, y], fill) < d2(px[x, y], bg):
+                fills.add((x - left, y - top))
+    is_fill = lambda x, y: (x, y) in fills
+
+    radii = {
+        name: radius_from_cutout(corner_cutout_area(is_fill, bw, bh, cx, cy))
+        for name, (cx, cy) in (("tl", (0, 0)), ("tr", (1, 0)),
+                               ("bl", (0, 1)), ("br", (1, 1)))
+    }
+    return {
+        "uniform": False,
+        "fill": to_hex(fill),
+        "bg": to_hex(bg),
+        "bbox": [x0 + left, y0 + top, x0 + right, y0 + bot],
+        "size": [bw, bh],
+        "radii": radii,
+        "density": len(fills) / float(bw * bh),
+        "clipped": left == 0 or top == 0 or right == w - 1 or bot == h - 1,
+    }
+
+
+def cmd_geometry(args):
+    spec, img_path = load_spec(args.regions)
+    dpr = spec.get("dpr") or 1
+    with Image.open(img_path) as im:
+        im = im.convert("RGB")
+        W, H = im.size
+        for region in spec["regions"]:
+            rid = region.get("id") or slugify(region.get("name", "region"))
+            try:
+                box = resolve_box(region["box"], W, H)
+            except (ValueError, KeyError) as exc:
+                print(f"{rid}: skip ({exc})\n")
+                continue
+
+            # Region boxes are drawn tight to the component, but separating a
+            # shape from its background needs some background in frame. Grow the
+            # box outward rather than making every caller re-draw their map.
+            pad = region.get("context", args.context)
+            box = (max(0, box[0] - pad), max(0, box[1] - pad),
+                   min(W, box[2] + pad), min(H, box[3] + pad))
+
+            g = region_geometry(im, box)
+            print(f"=== {rid}  ({region.get('name', '')})  {list(box)}")
+            if g is None:
+                print("    could not separate a shape from its background\n")
+                continue
+            if g["uniform"]:
+                print(f"    {g['fill']} throughout — no shape boundary inside this box")
+                print("    (box the component tightly, with a few px of surrounding page)\n")
+                continue
+
+            bw, bh = g["size"]
+            print(f"    fill    {g['fill']}  on  {g['bg']}")
+            print(f"    bbox    {g['bbox'][0]},{g['bbox'][1]} -> {g['bbox'][2]},{g['bbox'][3]}"
+                  f"   {bw} x {bh} px")
+
+            r = g["radii"]
+            vals = [r[k] for k in ("tl", "tr", "bl", "br")]
+            print("    radius  " + "  ".join(f"{k} {r[k]:.0f}" for k in ("tl", "tr", "bl", "br")))
+
+            # A bounding box that its own fill barely occupies is not one shape:
+            # it is a line of text, or a row of buttons, or a shape plus its
+            # neighbour. Corner radii are meaningless there, and reporting one
+            # confidently is worse than reporting nothing — a text block reads
+            # as a perfect pill.
+            if g["density"] < MIN_SHAPE_DENSITY:
+                print(f"    warn    fill occupies only {g['density'] * 100:.0f}% of that bounding"
+                      " box, so it is not a single shape — a text line, a row of controls, or"
+                      " two components in one box. Radii above are meaningless; re-box one shape.")
+                print()
+                continue
+
+            spread = max(vals) - min(vals)
+            avg = sum(vals) / 4
+            top_pair = (r["tl"] + r["tr"]) / 2
+            bot_pair = (r["bl"] + r["br"]) / 2
+            if spread > max(RADIUS_SPREAD_ABS, RADIUS_SPREAD_REL * avg):
+                # A soft shadow — the shape's own, or the one cast by whatever
+                # sits above it — sits between the fill and the page in value,
+                # so one edge of the shape absorbs it and that pair of corners
+                # reads too large. Shadows only ever inflate a corner, so when
+                # each pair is internally consistent the smaller pair is the
+                # uncontaminated measurement.
+                # Only the uncontaminated pair has to be internally consistent.
+                # The shadowed pair is free to be wildly uneven — it is being
+                # measured through a gradient, not off an edge.
+                if bot_pair > top_pair:
+                    edge, big, small = "bottom", bot_pair, top_pair
+                    clean = abs(r["tl"] - r["tr"]) < RADIUS_SPREAD_ABS
+                else:
+                    edge, big, small = "top", top_pair, bot_pair
+                    clean = abs(r["bl"] - r["br"]) < RADIUS_SPREAD_ABS
+                if clean and big > small + RADIUS_SPREAD_ABS:
+                    print(f"    ->      {edge} corners read {big:.0f} against {small:.0f} on the"
+                          " other edge — a soft shadow is being counted as fill there.")
+                    print(f"            Radius is ~{small / dpr:.0f}px. The shadow is real;"
+                          " measure it separately on a crop taken with --context.")
+                else:
+                    print("    ->      corners disagree -> not a uniform border-radius; view the"
+                          " crop before writing a single value (organic/blob shape, or a"
+                          " clipped box)")
+            elif abs(bw - bh) <= 2 and avg >= 0.42 * bw:
+                print(f"    ->      circle, {bw}px across — write 50% / rounded-full")
+            elif avg >= 0.42 * min(bw, bh):
+                print("    ->      fully rounded ends — write a pill (9999px / rounded-full)")
+            else:
+                css = avg / dpr
+                unit = f"{css:.0f}px" + (f" css (÷{dpr} dpr)" if dpr != 1 else "")
+                print(f"    ->      uniform radius ~{unit}")
+            if g["clipped"]:
+                print("    warn    shape touches the box edge; the true bounds may extend further")
+            print()
+
+
 # ---------------------------------------------------------------- contrast
 
 
@@ -381,6 +642,13 @@ def main():
     sl.add_argument("regions")
     sl.add_argument("--top", type=int, default=6)
     sl.set_defaults(func=cmd_colors)
+
+    sg = sub.add_parser("geometry", help="fill bounding box and corner radii per region")
+    sg.add_argument("regions")
+    sg.add_argument("--context", type=int, default=6,
+                    help="pixels of background to include around each box (default 6); "
+                         "a shape cannot be separated from a background that isn't in frame")
+    sg.set_defaults(func=cmd_geometry)
 
     st = sub.add_parser("contrast", help="WCAG contrast ratio between two colors")
     st.add_argument("fg")
