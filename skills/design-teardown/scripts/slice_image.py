@@ -210,6 +210,10 @@ def cmd_crop(args):
 # ---------------------------------------------------------------- colors
 
 
+# Two corner samples this close are the same fill with dithering noise on top.
+CORNER_TOLERANCE = 6
+
+
 def region_palette(im, box, top):
     crop = im.crop(box).convert("RGB")
     w, h = crop.size
@@ -234,18 +238,39 @@ def region_palette(im, box, top):
         out.append({"hex": to_hex(rgb), "rgb": list(rgb), "coverage_pct": round(100 * count / total, 1)})
 
     inset = min(3, max(1, min(w, h) // 8))
-    probes = {
-        "top_left": to_hex(crop.getpixel((inset, inset))),
-        "top_right": to_hex(crop.getpixel((w - 1 - inset, inset))),
-        "bottom_left": to_hex(crop.getpixel((inset, h - 1 - inset))),
-        "bottom_right": to_hex(crop.getpixel((w - 1 - inset, h - 1 - inset))),
-        "center": to_hex(crop.getpixel((w // 2, h // 2))),
+    raw = {
+        "top_left": crop.getpixel((inset, inset)),
+        "top_right": crop.getpixel((w - 1 - inset, inset)),
+        "bottom_left": crop.getpixel((inset, h - 1 - inset)),
+        "bottom_right": crop.getpixel((w - 1 - inset, h - 1 - inset)),
+        "center": crop.getpixel((w // 2, h // 2)),
     }
-    corners = {probes[k] for k in ("top_left", "top_right", "bottom_left", "bottom_right")}
-    if len(corners) == 1:
-        hint = "corners identical -> flat fill (or the component is inset from its box)"
-    elif len(corners) <= 2:
-        hint = "corners differ in pairs -> likely a linear gradient"
+    probes = {k: to_hex(v) for k, v in raw.items()}
+
+    # Corners are single pixels, so PNG dithering and a soft edge routinely make
+    # two samples of the same flat fill differ by a value or two. Comparing the
+    # hex strings exactly reported a "gradient" on most flat surfaces, which is
+    # worse than saying nothing. Group with a tolerance instead.
+    tl, tr, bl, br = (raw[k] for k in ("top_left", "top_right", "bottom_left", "bottom_right"))
+    same = lambda a, b: max(abs(x - y) for x, y in zip(a, b)) <= CORNER_TOLERANCE
+
+    # If no corner probe is anywhere near the region's dominant colour, all four
+    # landed outside the component — a large corner radius put them on the page
+    # behind. Any gradient read off them describes the page, not the fill, and a
+    # shadow under one edge is enough to make that page look like a gradient.
+    dominant = tuple(out[0]["rgb"]) if out else None
+    if dominant is not None and not any(same(c, dominant) for c in (tl, tr, bl, br)):
+        hint = ("no corner probe matches the dominant fill -> all four are off the component,"
+                " caught by its corner radius. Re-sample with a tighter box; use `geometry`"
+                " for the shape itself.")
+    elif same(tl, tr) and same(tl, bl) and same(tl, br):
+        hint = "corners match -> flat fill (or the component is inset from its box)"
+    elif same(tl, tr) and same(bl, br):
+        hint = "top pair differs from bottom pair -> likely a vertical gradient"
+    elif same(tl, bl) and same(tr, br):
+        hint = "left pair differs from right pair -> likely a horizontal gradient"
+    elif same(tl, br) and same(tr, bl):
+        hint = "diagonal pairs match -> likely a diagonal gradient"
     else:
         hint = "all corners differ -> rounded corners showing page behind, or a complex fill"
 
