@@ -19,7 +19,7 @@ How to get trustworthy values out of a crop, and how to turn raw measurements in
 
 Tag every value in the final spec:
 
-- **measured** — came out of the sampler, or counted directly on an upscaled crop. Colors from `colors`, pixel dimensions from `manifest.json`, contrast ratios.
+- **measured** — came out of the sampler. Colors from `colors`, radii and bounding boxes from `geometry`, pixel dimensions from `manifest.json`, contrast ratios from `contrast`. A value counted by eye on an upscaled crop is only `measured` when the shape genuinely contrasts with its background; otherwise it's `inferred`.
 - **inferred** — derived from measured values plus a reasonable assumption. "Paddings measured 15/16/17px, so the scale is 4px and this is `space-4`." Font sizes read off an upscaled crop. Shadow blur estimates.
 - **guessed** — no evidence in the image. Font family, hover colors, transition timing, breakpoint behavior.
 
@@ -27,7 +27,16 @@ This matters because the person receiving the prompt needs to know which numbers
 
 ## 2. Geometry: radius, borders, spacing
 
-**Border radius.** On a crop upscaled with NEAREST, the corner is a visible staircase. Count the pixels from where the edge starts curving to where the curve meets the adjacent edge — that run length is roughly the radius. Divide by the upscale factor, then by DPR. Fully rounded ends (a pill) look like a perfect semicircle whose radius equals half the height; write those as `9999px` / `rounded-full` rather than a measured number, since that's the intent.
+**Border radius.** Run `geometry` and take its verdict. Do not count the staircase by eye — it only works when the shape contrasts with what's behind it, and light-theme UIs routinely put a `#FAFCFE` card on a `#FFFFFF` page, a 5/255 difference that is invisible at any magnification. Eyeballing it there doesn't produce an imprecise answer, it produces a confident wrong one.
+
+Two traps the subcommand exists to catch:
+
+- **Shadows inflate a corner.** A soft shadow sits between the fill and the page in value, so whichever edge carries it absorbs it and those corners measure far too large. `geometry` reports which pair is contaminated and which to use. Never average the four.
+- **Not everything rounded is a rounded rectangle.** Organic blob masks — asymmetric per-corner radii, or an SVG clip path — are common in illustration-led designs, and they read as circles at a glance. Four corners that disagree by more than a few pixels on a shape whose crop looks circular is the signature. A blob shipped as `border-radius: 50%` passes review right up until someone overlays it.
+
+Fully rounded ends (a pill) look like a perfect semicircle whose radius equals half the height; write those as `9999px` / `rounded-full` rather than a measured number, since that's the intent. `geometry` labels them.
+
+If `geometry` says the fill occupies a small fraction of its bounding box, the box holds text or several controls rather than one shape, and no radius from it means anything. Re-box and re-run.
 
 **Borders.** A 1px border at DPR 2 is 2 source pixels and will survive upscaling as a clean band. Distinguish a border from a shadow: borders are uniform on all sides and hard-edged; shadows fall off in value and are usually asymmetric (heavier below). Distinguish a border from a background seam by checking whether the line continues past the component's corner — a seam does, a border doesn't.
 
@@ -101,7 +110,10 @@ Each of these is worth its own crop and its own line in the spec, because inferr
 |---|---|
 | Text color looks lighter than it is | Anti-aliasing blends thin strokes toward the background. Sample the densest interior pixels of a thick glyph, or trust the sampler over your eye. |
 | A shadow read as a border | Check for value falloff and asymmetry. |
-| Spacing off by 2x | The capture is @2x and DPR wasn't divided out. Check `probe` output first. |
+| Spacing off by 2x | The capture is @2x and DPR wasn't divided out. Check `probe` output first — and if it flags the file as an exported artboard, its DPR guess is not evidence, so settle it from a cap height instead. |
+| A blob shipped as a circle | Asymmetric organic masks are common in illustration-led designs. `geometry` reporting four corners that disagree on a shape that looks circular is the tell. |
+| Radius too large on one edge | A drop shadow, the shape's own or the one cast by the element above it, is being counted as fill. Use the clean pair. |
+| Two surfaces treated as one | A card 5/255 off the page behind it is a real, deliberate distinction that no eye can name. Cluster colors, but not so aggressively that neighbouring surfaces merge. |
 | Inconsistent paddings everywhere | Anti-aliased edges make boundaries ambiguous by a pixel or two. Cluster before reporting. |
 | Every card gets its own component | They're one component with different props. Look for the shared skeleton. |
 | Gradient reported as flat | Corners sampled inside a rounded region, catching the page color. Tighten the box. |
