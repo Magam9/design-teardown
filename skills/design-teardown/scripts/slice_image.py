@@ -40,10 +40,18 @@ DEVICE_CLASSES = [
     (500, "small mobile", 1),
     (1000, "mobile", 2),
     (1400, "mobile @3x or small tablet", 3),
-    (1700, "desktop or tablet @2x", 1),
+    (1700, "laptop @1x or tablet portrait", 1),
     (2200, "desktop", 1),
     (3200, "desktop @2x", 2),
 ]
+
+# Long edges that are overwhelmingly likely to be a real viewport rather than an
+# exported artboard. Used only to decide how loudly to caveat the DPR guess.
+COMMON_DEVICE_EDGES = {
+    640, 667, 736, 812, 844, 896, 926, 1024, 1080, 1112, 1136, 1194, 1280,
+    1366, 1440, 1512, 1536, 1600, 1728, 1792, 1920, 2048, 2160, 2560, 2880,
+    3024, 3072, 3456, 3840,
+}
 
 
 # ---------------------------------------------------------------- helpers
@@ -140,6 +148,21 @@ def cmd_probe(args):
         print("note          tall capture; likely a full-page scroll — slice by section first")
     if w > h * 3:
         print("note          very wide; possibly multiple screens side by side")
+
+    # The device class above is inferred from dimensions alone, which is only
+    # meaningful for an actual viewport capture. Exported artboards and
+    # presentation mockups land on round numbers no device ever produces, and
+    # for those the DPR guess carries no information at all.
+    artboard = (
+        long_edge not in COMMON_DEVICE_EDGES
+        and w % 100 == 0 and h % 100 == 0
+    )
+    if artboard:
+        print("note          round dimensions and no matching device width — this looks like an")
+        print("              exported artboard or presentation mockup, not a viewport capture.")
+        print("              The DPR guess above is not evidence. Confirm it from a measured cap")
+        print("              height (body text below ~10px means the export is @2x) before")
+        print("              dividing anything.")
     print()
     print("Logical (CSS) size if the DPR guess holds: "
           f"{round(w / dpr)} x {round(h / dpr)}")
